@@ -303,7 +303,7 @@ footer.pie a{color:var(--oro);text-decoration:none;font-weight:600;}
     <div id="resumen-categorias"></div>
   </div>
   <div class="card" id="resumen-super-card" style="display:none;">
-    <h3>Supermercado por tipo de artículo</h3>
+    <h3>Artículos por tipo</h3>
     <div id="resumen-super"></div>
   </div>
   <button class="btn btn-zafiro" onclick="exportarExcel()">
@@ -562,8 +562,8 @@ async function analizarTicket(){
   const prompt = 'Eres un extractor de datos de tickets de compra de Espa\u00F1a. Las im\u00E1genes son partes de UN MISMO ticket. Devuelve SOLO un objeto JSON v\u00E1lido, sin markdown, sin explicaciones, con esta estructura exacta:\n' +
   '{"comercio":"nombre del establecimiento","fecha":"YYYY-MM-DD","total":0.00,"categoria":"una de: ' + cats.join(', ') + '","es_supermercado":true,"items":[{"nombre":"descripci\u00F3n corta","precio":0.00,"subcategoria":"una de: ' + SUBCATS.join(', ') + '"}]}\n' +
   'Reglas:\n' +
+  '- "items": incluye SIEMPRE el desglose completo cuando el ticket liste art\u00EDculos con su precio (supermercado, hipermercado, bazar, ferreter\u00EDa, farmacia, droguer\u00EDa, tienda de ropa...). Extrae TODOS los art\u00EDculos, uno por l\u00EDnea del ticket. Deja [] solo si el ticket no detalla art\u00EDculos (p. ej. un repostaje de gasolina o un men\u00FA sin desglose).\n' +
   '- "es_supermercado" es true solo si es un supermercado o hipermercado (Mercadona, Consum, Lidl, Carrefour, etc.).\n' +
-  '- "items" solo se rellena si es_supermercado es true; si no, lista vac\u00EDa [].\n' +
   '- En items, si una l\u00EDnea tiene cantidad m\u00FAltiple, usa el importe total de la l\u00EDnea. No incluyas l\u00EDneas de subtotal, IVA ni entrega.\n' +
   '- "total" es el importe final pagado.\n' +
   '- Si la fecha no es legible, usa ' + hoyIso() + '.\n' +
@@ -621,7 +621,7 @@ function prepararRevision(json){
     fecha: /^\d{4}-\d{2}-\d{2}$/.test(json.fecha||'') ? json.fecha : hoyIso(),
     total: Number(json.total)||0,
     categoria: cats.includes(json.categoria) ? json.categoria : (cats[cats.length-1]||'Otros'),
-    esSuper: !!json.es_supermercado,
+    esSuper: (Array.isArray(json.items) && json.items.length>0) || !!json.es_supermercado,
     items: Array.isArray(json.items) ? json.items.map(it=>({
       nombre: String(it.nombre||'').slice(0,80),
       precio: Number(it.precio)||0,
@@ -640,15 +640,13 @@ function prepararRevision(json){
 }
 
 function cambioCategoriaRevision(){
-  const cat = document.getElementById('rev-categoria').value;
-  extraccion.esSuper = (cat==='Supermercado');
+  /* La categor\u00EDa ya no condiciona el desglose: si hay art\u00EDculos, se conservan siempre. */
   renderItemsRevision();
 }
 
 function renderItemsRevision(){
   const card = document.getElementById('rev-items-card');
   const cont = document.getElementById('rev-items');
-  if(!extraccion.esSuper){ card.style.display='none'; return; }
   card.style.display = 'block';
   cont.innerHTML = '';
   extraccion.items.forEach((it,i)=>{
@@ -674,10 +672,10 @@ function renderItemsRevision(){
 }
 
 function actualizarSumaItems(){
-  if(!extraccion.esSuper){ return; }
   const suma = extraccion.items.reduce((a,it)=>a+(Number(it.precio)||0),0);
   const total = Number(document.getElementById('rev-total').value)||0;
   const el = document.getElementById('rev-suma-items');
+  if(!extraccion.items.length){ el.textContent=''; return; }
   const dif = Math.abs(suma-total);
   el.textContent = ' — suma ' + fmtEur.format(suma) + (dif>0.05 ? ' (difiere del total)' : '');
   el.style.color = dif>0.05 ? 'var(--oro)' : 'var(--pizarra)';
@@ -689,14 +687,15 @@ function anadirItemRevision(){
 }
 
 async function guardarTicket(){
+  const itemsLimpios = extraccion.items.filter(it=>it.nombre.trim()!=='');
   const t = {
     id: ticketDetalle ? ticketDetalle.id : String(Date.now()),
     comercio: document.getElementById('rev-comercio').value.trim() || 'Comercio',
     fecha: document.getElementById('rev-fecha').value || hoyIso(),
     categoria: document.getElementById('rev-categoria').value,
     total: Number(document.getElementById('rev-total').value)||0,
-    esSuper: extraccion.esSuper,
-    items: extraccion.esSuper ? extraccion.items.filter(it=>it.nombre.trim()!=='') : [],
+    esSuper: itemsLimpios.length>0,
+    items: itemsLimpios,
     creadoEn: ticketDetalle ? ticketDetalle.creadoEn : new Date().toISOString()
   };
   await dbGuardar(t);
@@ -797,7 +796,7 @@ function abrirDetalle(t){
     '<div class="desglose-fila"><span class="n">Categor\u00EDa</span><span class="v">'+escapeHtml(t.categoria)+'</span></div>'+
     '<div class="desglose-fila"><span class="n">Total</span><span class="v">'+fmtEur.format(t.total)+'</span></div>'+
     '</div>';
-  if(t.esSuper && t.items.length){
+  if((t.items||[]).length){
     html += '<div class="card"><h3>Art\u00EDculos ('+t.items.length+')</h3>'+
       t.items.map(it=>'<div class="desglose-fila"><span class="n">'+escapeHtml(it.nombre)+' <span class="chip">'+escapeHtml(it.subcategoria)+'</span></span><span class="v">'+fmtEur.format(it.precio)+'</span></div>').join('')+
       '</div>';
@@ -836,7 +835,7 @@ async function renderResumen(){
   document.getElementById('resumen-categorias').innerHTML = barrasCategorias(tickets) ||
     '<div class="vacio" style="padding:18px 8px;">Sin tickets en este mes.</div>';
 
-  const items = tickets.filter(t=>t.esSuper).flatMap(t=>t.items||[]);
+  const items = tickets.flatMap(t=>t.items||[]);
   const cardS = document.getElementById('resumen-super-card');
   if(items.length){
     const por = {};
@@ -863,7 +862,7 @@ async function exportarExcel(){
     'Fecha': t.fecha, 'Comercio': t.comercio, 'Categor\u00EDa': t.categoria, 'Total (\u20AC)': t.total
   }));
 
-  const hojaItems = tickets.filter(t=>t.esSuper).flatMap(t=>
+  const hojaItems = tickets.flatMap(t=>
     (t.items||[]).map(it=>({
       'Fecha': t.fecha, 'Comercio': t.comercio, 'Art\u00EDculo': it.nombre,
       'Subcategor\u00EDa': it.subcategoria, 'Precio (\u20AC)': it.precio
