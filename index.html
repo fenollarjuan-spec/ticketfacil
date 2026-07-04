@@ -292,6 +292,7 @@ footer.pie a{color:var(--oro);text-decoration:none;font-weight:600;}
     <div class="mes-nombre" id="resumen-mes-nombre"></div>
     <button onclick="cambiarMes(1)" aria-label="Mes siguiente">&#8250;</button>
   </div>
+  <p id="resumen-rango" style="text-align:center;font-size:12px;color:var(--pizarra);margin:-8px 0 14px;"></p>
   <div class="card">
     <div class="total-mes">
       <div class="cifra" id="resumen-total">0,00 €</div>
@@ -395,6 +396,7 @@ let db = null;
 let fotos = [];               // [{dataUrl, media_type, base64}]
 let extraccion = null;        // resultado editable en revisión
 let mesResumen = mesKey(new Date().toISOString().slice(0,10));
+let resumenIniciado = false;
 let ticketDetalle = null;
 
 /* ================= UTILIDADES ================= */
@@ -560,11 +562,12 @@ async function analizarTicket(){
 
   const cats = getCategorias();
   const prompt = 'Eres un extractor de datos de tickets de compra de Espa\u00F1a. Las im\u00E1genes son partes de UN MISMO ticket. Devuelve SOLO un objeto JSON v\u00E1lido, sin markdown, sin explicaciones, con esta estructura exacta:\n' +
-  '{"comercio":"nombre del establecimiento","fecha":"YYYY-MM-DD","total":0.00,"categoria":"una de: ' + cats.join(', ') + '","es_supermercado":true,"items":[{"nombre":"descripci\u00F3n corta","precio":0.00,"subcategoria":"una de: ' + SUBCATS.join(', ') + '"}]}\n' +
+  '{"comercio":"nombre del establecimiento","fecha":"YYYY-MM-DD","total":0.00,"categoria":"una de: ' + cats.join(', ') + '","es_supermercado":true,"items":[{"nombre":"nombre gen\u00E9rico normalizado","precio":0.00,"subcategoria":"una de: ' + SUBCATS.join(', ') + '"}]}\n' +
   'Reglas:\n' +
   '- "items": incluye SIEMPRE el desglose completo cuando el ticket liste art\u00EDculos con su precio (supermercado, hipermercado, bazar, ferreter\u00EDa, farmacia, droguer\u00EDa, tienda de ropa...). Extrae TODOS los art\u00EDculos, uno por l\u00EDnea del ticket. Deja [] solo si el ticket no detalla art\u00EDculos (p. ej. un repostaje de gasolina o un men\u00FA sin desglose).\n' +
+  '- "nombre" de cada art\u00EDculo: NORMALIZA a un nombre gen\u00E9rico y corto en espa\u00F1ol, quitando marca, formato, gramaje y n\u00FAmero de unidades. Ejemplos: el ticket pone "LECHE PASCUAL ENT.1L" \u2192 escribe "Leche entera"; el ticket pone "PECH POLLO FILETE 500G" \u2192 escribe "Pechuga de pollo"; el ticket pone "PAPEL HIG 4 CAPAS X12" \u2192 escribe "Papel higi\u00E9nico". El objetivo es que el mismo producto comprado en tickets distintos quede siempre escrito igual, para poder sumarlo despu\u00E9s.\n' +
   '- "es_supermercado" es true solo si es un supermercado o hipermercado (Mercadona, Consum, Lidl, Carrefour, etc.).\n' +
-  '- En items, si una l\u00EDnea tiene cantidad m\u00FAltiple, usa el importe total de la l\u00EDnea. No incluyas l\u00EDneas de subtotal, IVA ni entrega.\n' +
+  '- En items, si una l\u00EDnea tiene cantidad m\u00FAltiple, usa el importe total de la l\u00EDnea (no el precio unitario). No incluyas l\u00EDneas de subtotal, IVA ni entrega.\n' +
   '- "total" es el importe final pagado.\n' +
   '- Si la fecha no es legible, usa ' + hoyIso() + '.\n' +
   '- Precios como n\u00FAmero con punto decimal.\n' +
@@ -827,7 +830,26 @@ function cambiarMes(dir){
 }
 
 async function renderResumen(){
+  if(!resumenIniciado){
+    resumenIniciado = true;
+    const todos = await dbTodos();
+    const hayEnMesActual = todos.some(t=>mesKey(t.fecha)===mesResumen);
+    if(!hayEnMesActual && todos.length){
+      const masReciente = todos.map(t=>t.fecha).sort().pop();
+      mesResumen = mesKey(masReciente);
+    }
+  }
   document.getElementById('resumen-mes-nombre').textContent = nombreMes(mesResumen);
+  const todosParaRango = await dbTodos();
+  const rangoEl = document.getElementById('resumen-rango');
+  if(todosParaRango.length){
+    const mesesConDatos = [...new Set(todosParaRango.map(t=>mesKey(t.fecha)))].sort();
+    rangoEl.textContent = mesesConDatos.length>1
+      ? 'Tienes tickets entre ' + nombreMes(mesesConDatos[0]) + ' y ' + nombreMes(mesesConDatos[mesesConDatos.length-1])
+      : '';
+  }else{
+    rangoEl.textContent = '';
+  }
   const tickets = (await dbTodos()).filter(t=>mesKey(t.fecha)===mesResumen);
   const total = tickets.reduce((a,t)=>a+t.total,0);
   document.getElementById('resumen-total').textContent = fmtEur.format(total);
@@ -859,15 +881,32 @@ async function exportarExcel(){
   if(!tickets.length){ alert('No hay tickets que exportar.'); return; }
 
   const hojaTickets = tickets.map(t=>({
-    'Fecha': t.fecha, 'Comercio': t.comercio, 'Categor\u00EDa': t.categoria, 'Total (\u20AC)': t.total
+    'Fecha': t.fecha, 'Comercio': t.comercio, 'Categor\u00EDa': t.categoria,
+    'N\u00BA art\u00EDculos': (t.items||[]).length, 'Total (\u20AC)': Number(t.total.toFixed(2))
   }));
 
   const hojaItems = tickets.flatMap(t=>
     (t.items||[]).map(it=>({
-      'Fecha': t.fecha, 'Comercio': t.comercio, 'Art\u00EDculo': it.nombre,
-      'Subcategor\u00EDa': it.subcategoria, 'Precio (\u20AC)': it.precio
+      'Fecha': t.fecha, 'Comercio': t.comercio, 'Categor\u00EDa ticket': t.categoria,
+      'Art\u00EDculo': it.nombre, 'Subcategor\u00EDa': it.subcategoria, 'Precio (\u20AC)': Number(it.precio.toFixed(2))
     }))
   );
+
+  // Top productos: agrupado por nombre normalizado (min\u00FAsculas, sin espacios sobrantes)
+  const porProducto = {};
+  tickets.forEach(t=>(t.items||[]).forEach(it=>{
+    const clave = it.nombre.trim().toLowerCase();
+    if(!clave) return;
+    if(!porProducto[clave]) porProducto[clave] = {nombre: it.nombre.trim(), veces:0, total:0, subcategoria: it.subcategoria};
+    porProducto[clave].veces += 1;
+    porProducto[clave].total += it.precio;
+  }));
+  const hojaTop = Object.values(porProducto)
+    .sort((a,b)=>b.total-a.total)
+    .map(p=>({
+      'Art\u00EDculo': p.nombre, 'Subcategor\u00EDa': p.subcategoria, 'Veces comprado': p.veces,
+      'Gasto total (\u20AC)': Number(p.total.toFixed(2)), 'Precio medio (\u20AC)': Number((p.total/p.veces).toFixed(2))
+    }));
 
   const meses = [...new Set(tickets.map(t=>mesKey(t.fecha)))].sort();
   const cats = [...new Set(tickets.map(t=>t.categoria))].sort();
@@ -882,10 +921,22 @@ async function exportarExcel(){
     fila['TOTAL'] = Number(tot.toFixed(2));
     return fila;
   });
+  if(hojaResumen.length){
+    const filaTotal = {'Mes': 'TOTAL'};
+    let totGeneral = 0;
+    cats.forEach(c=>{
+      const v = tickets.filter(t=>t.categoria===c).reduce((a,t)=>a+t.total,0);
+      filaTotal[c] = Number(v.toFixed(2));
+      totGeneral += v;
+    });
+    filaTotal['TOTAL'] = Number(totGeneral.toFixed(2));
+    hojaResumen.push(filaTotal);
+  }
 
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(hojaTickets), 'Tickets');
-  if(hojaItems.length) XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(hojaItems), 'Art\u00EDculos s\u00FAper');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(hojaItems.length ? hojaItems : [{'Aviso':'Ning\u00FAn ticket tiene art\u00EDculos desglosados todav\u00EDa'}]), 'Art\u00EDculos');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(hojaTop.length ? hojaTop : [{'Aviso':'Ning\u00FAn ticket tiene art\u00EDculos desglosados todav\u00EDa'}]), 'Top productos');
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(hojaResumen), 'Resumen mensual');
   XLSX.writeFile(wb, 'TicketFacil_' + hoyIso() + '.xlsx');
 }
